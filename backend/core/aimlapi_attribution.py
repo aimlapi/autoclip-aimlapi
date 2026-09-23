@@ -20,7 +20,7 @@ AIMLAPI_BASE_URL = "https://api.aimlapi.com/v1"
 AIMLAPI_SOURCE = "agent/autoclip"
 # 合作伙伴 ID 由 AI/ML API 侧随机生成后登记。留空表示「还没有」——
 # 留空时不发这个头，而不是发一个不存在的值（未知 id 会被静默忽略）。
-AIMLAPI_PARTNER_ID = ""
+AIMLAPI_PARTNER_ID = "part_qVR4oZesx5sRaPUBvUjDQf7p"
 
 _REFERER = "https://github.com/zhouxiaoka/autoclip"
 _TITLE = "AutoClip"
