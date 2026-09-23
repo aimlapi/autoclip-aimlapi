@@ -97,6 +97,7 @@ class LLMManager:
             "dashscope_base_url": os.getenv("DASHSCOPE_BASE_URL", ""),
             "gemini_api_key": "",
             "siliconflow_api_key": "",
+            "aimlapi_api_key": "",
             "deepseek_api_key": "",
             "kimi_api_key": "",
             "glm_api_key": "",
@@ -123,6 +124,7 @@ class LLMManager:
                             "openai_api_key": api_keys.get("openai", ""),
                             "gemini_api_key": api_keys.get("gemini", ""),
                             "siliconflow_api_key": api_keys.get("siliconflow", ""),
+                            "aimlapi_api_key": api_keys.get("aimlapi", ""),
                             "deepseek_api_key": api_keys.get("deepseek", ""),
                             "kimi_api_key": api_keys.get("kimi", ""),
                             "glm_api_key": api_keys.get("glm", ""),
@@ -193,6 +195,7 @@ class LLMManager:
     # Docker / 本地脚本模式没有设置页可用，只能靠环境变量（env.example 里也是这么写的），
     # 但此前这里只读 settings.json，导致 API_DASHSCOPE_API_KEY 等变量形同虚设。
     _ENV_KEY_FALLBACKS = {
+        "aimlapi_api_key": ("API_AIMLAPI_API_KEY", "AIMLAPI_API_KEY"),
         "dashscope_api_key": ("API_DASHSCOPE_API_KEY", "DASHSCOPE_API_KEY"),
         "openai_api_key": ("API_OPENAI_API_KEY", "OPENAI_API_KEY"),
         "gemini_api_key": ("API_GEMINI_API_KEY", "GEMINI_API_KEY"),

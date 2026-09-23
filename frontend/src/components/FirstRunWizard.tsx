@@ -190,6 +190,7 @@ const FirstRunWizard: React.FC<FirstRunWizardProps> = ({ onComplete }) => {
         api: {
           api_keys: {
             // 只更新当前提供商的API key，保持其他提供商的值
+            aimlapi: config.llmProvider === 'aimlapi' ? config.llmApiKey : (existingApiKeys.aimlapi || ''),
             dashscope: config.llmProvider === 'dashscope' ? config.llmApiKey : (existingApiKeys.dashscope || ''),
             openai: config.llmProvider === 'openai' ? config.llmApiKey : (existingApiKeys.openai || ''),
             gemini: config.llmProvider === 'gemini' ? config.llmApiKey : (existingApiKeys.gemini || ''),
@@ -203,7 +204,8 @@ const FirstRunWizard: React.FC<FirstRunWizardProps> = ({ onComplete }) => {
             jimeng_secret: existingApiKeys.jimeng_secret || ''
           },
           api_provider: config.llmProvider,
-          api_model: config.llmProvider === 'dashscope' ? 'qwen-plus' : 
+          api_model: config.llmProvider === 'aimlapi' ? 'openai/gpt-6-luna' :
+                     config.llmProvider === 'dashscope' ? 'qwen-plus' : 
                      config.llmProvider === 'openai' ? 'gpt-5-mini' :
                      config.llmProvider === 'gemini' ? 'gemini-3.8-flash' :
                      config.llmProvider === 'deepseek' ? 'deepseek-flash' :
@@ -370,6 +372,11 @@ const FirstRunWizard: React.FC<FirstRunWizardProps> = ({ onComplete }) => {
   // 获取API Key获取方式的智能提示
   const getApiKeyHelp = (provider: string) => {
     const helpMap: Record<string, { name: string; url: string; description: string }> = {
+      aimlapi: {
+        name: 'AI/ML API',
+        url: 'https://aimlapi.com/app/keys',
+        description: '注册 AI/ML API 账号，在 Keys 页面创建密钥；一个 key 覆盖 GPT / Claude / Gemini / Qwen 等模型'
+      },
       dashscope: {
         name: '阿里云通义千问',
         url: 'https://dashscope.aliyun.com',
@@ -462,6 +469,12 @@ const FirstRunWizard: React.FC<FirstRunWizardProps> = ({ onComplete }) => {
                 style={{ marginBottom: '12px' }}
               >
                 <Select size="middle" placeholder="选择提供商">
+                  <Option value="aimlapi">
+                    <Space>
+                      <Text strong>AI/ML API</Text>
+                      <Text type="secondary">(聚合网关，一个 key 300+ 模型)</Text>
+                    </Space>
+                  </Option>
                   <Option value="dashscope">
                     <Space>
                       <Text strong>阿里云通义千问</Text>

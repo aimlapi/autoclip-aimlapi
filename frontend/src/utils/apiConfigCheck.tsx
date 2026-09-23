@@ -72,6 +72,7 @@ export const checkApiConfig = async (): Promise<ApiConfigStatus> => {
     console.log('API配置详情:', {
       currentProvider,
       apiKeys: {
+        aimlapi: apiKeys.aimlapi ? '***' + apiKeys.aimlapi.slice(-4) : '未配置',
         dashscope: apiKeys.dashscope ? '***' + apiKeys.dashscope.slice(-4) : '未配置',
         openai: apiKeys.openai ? '***' + apiKeys.openai.slice(-4) : '未配置',
         gemini: apiKeys.gemini ? '***' + apiKeys.gemini.slice(-4) : '未配置',
@@ -114,6 +115,7 @@ export const checkApiConfig = async (): Promise<ApiConfigStatus> => {
         hasValidKey = !!currentApiKey.trim()
         console.log('SiliconFlow API Key检查:', { hasKey: !!currentApiKey, keyLength: currentApiKey.length, isValid: hasValidKey })
         break
+      case 'aimlapi':
       case 'deepseek':
       case 'seed':
       case 'kimi':

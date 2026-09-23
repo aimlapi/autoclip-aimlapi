@@ -37,7 +37,8 @@ export const useFirstRun = () => {
           console.log('📋 获取到设置:', settings)
           
           // 检查是否有API Key配置
-          const hasApiKey = settings.api?.api_keys?.dashscope || 
+          const hasApiKey = settings.api?.api_keys?.aimlapi ||
+                           settings.api?.api_keys?.dashscope || 
                            settings.api?.api_keys?.openai ||
                            settings.api?.api_keys?.gemini ||
                            settings.api?.api_keys?.siliconflow ||

@@ -33,10 +33,11 @@ const toNumber = (v: unknown, fallback: number): number => {
   return Number.isFinite(n) ? n : fallback
 }
 
-type ProviderKey = 'dashscope' | 'openai' | 'gemini' | 'deepseek' | 'seed' | 'kimi' | 'glm' | 'grok' | 'ollama' | 'lmstudio'
+type ProviderKey = 'aimlapi' | 'dashscope' | 'openai' | 'gemini' | 'deepseek' | 'seed' | 'kimi' | 'glm' | 'grok' | 'ollama' | 'lmstudio'
 type LocalPreset = { baseUrl: string; defaultModel: string; docsUrl: string; app: string }
 type CloudPreset = { baseUrl: string; defaultModel: string }
 const PROVIDERS: Record<ProviderKey, { name: string; short: string; hint: string; apiKeyField: string; placeholder: string; keyUrl: string; local?: LocalPreset; cloud?: CloudPreset }> = {
+  aimlapi: { name: 'AI/ML API', short: 'AI/ML API', get hint() { return t("AI/ML API 聚合网关。一个 key 打通 GPT / Claude / Gemini / Qwen / DeepSeek 等 300+ 对话模型。") }, apiKeyField: 'aimlapi_api_key', placeholder: '…', keyUrl: 'https://aimlapi.com/app/keys', cloud: { baseUrl: 'https://api.aimlapi.com/v1', defaultModel: 'openai/gpt-6-luna' } },
   dashscope: { get name() { return t("阿里通义千问") }, get short() { return t("通义千问") }, get hint() { return t("阿里云 DashScope。国内直连，qwen-plus 性价比高。") }, apiKeyField: 'dashscope_api_key', placeholder: 'sk-…', keyUrl: 'https://dashscope.console.aliyun.com/apiKey' },
   openai: { get name() { return t("OpenAI / 兼容接口") }, get short() { return t("OpenAI 兼容") }, get hint() { return t("OpenAI，或任何兼容接口：OpenRouter、vLLM。") }, apiKeyField: 'openai_api_key', get placeholder() { return t("sk-…（自建服务可留空）") }, keyUrl: 'https://platform.openai.com/api-keys' },
   gemini: { name: 'Google Gemini', short: 'Gemini', get hint() { return t("Google AI Studio 的 Gemini 系列。") }, apiKeyField: 'gemini_api_key', placeholder: 'AIza…', keyUrl: 'https://aistudio.google.com/apikey' },
@@ -58,6 +59,7 @@ type DashscopeRegion = 'cn' | 'intl'
 
 // 后端 /available-models 失败时的兜底；与 backend/core/model_catalog.py 对齐
 const FALLBACK_CATALOG: Record<string, string[]> = {
+  aimlapi: ['openai/gpt-6-luna', 'openai/gpt-6-sol', 'anthropic/claude-sonnet-5', 'google/gemini-3.8-flash', 'deepseek/deepseek-v4-pro', 'moonshot/kimi-k3', 'zhipu/glm-5.2', 'alibaba/qwen3.7-max'],
   dashscope: ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus', 'qwen-plus', 'qwen-plus-latest', 'qwen-max', 'qwen-max-latest', 'qwen-flash'],
   openai: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash'],
@@ -67,9 +69,9 @@ const FALLBACK_CATALOG: Record<string, string[]> = {
   glm: ['glm-5.3', 'glm-5.2', 'glm-4.7'],
   grok: ['grok-4.6', 'grok-4.5', 'grok-4.3'],
 }
-const PROVIDER_GROUP_ORDER: ProviderKey[] = ['dashscope', 'openai', 'gemini', 'deepseek', 'seed', 'kimi', 'glm', 'grok']
+const PROVIDER_GROUP_ORDER: ProviderKey[] = ['aimlapi', 'dashscope', 'openai', 'gemini', 'deepseek', 'seed', 'kimi', 'glm', 'grok']
 const providerGroupLabel = (key: string) => ({
-  dashscope: t("通义千问"), openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek',
+  aimlapi: 'AI/ML API', dashscope: t("通义千问"), openai: 'OpenAI', gemini: 'Gemini', deepseek: 'DeepSeek',
   seed: 'Seed', kimi: 'Kimi', glm: 'GLM', grok: 'Grok',
 } as Record<string, string>)[key] || key
 const knownCloudModels = (catalog: Record<string, string[]>, extra: string[] = []) =>
@@ -90,7 +92,7 @@ const cloudModelOptions = (
 }
 
 const CLOUD_DEFAULT_MODEL: Partial<Record<ProviderKey, string>> = {
-  dashscope: 'qwen-plus', openai: 'gpt-5-mini', gemini: 'gemini-3.8-flash', deepseek: 'deepseek-flash',
+  aimlapi: 'openai/gpt-6-luna', dashscope: 'qwen-plus', openai: 'gpt-5-mini', gemini: 'gemini-3.8-flash', deepseek: 'deepseek-flash',
   seed: 'doubao-seed-2-1-lite-260915', kimi: 'kimi-k2.6', glm: 'glm-5.3', grok: 'grok-4.6',
 }
 
@@ -158,6 +160,7 @@ const SettingsPage: React.FC = () => {
       setDashscopeRegion(providerName === 'dashscope' && normalizeBaseUrl(savedBaseUrl) === DASHSCOPE_INTL_BASE_URL ? 'intl' : 'cn')
       form.setFieldsValue({
         llm_provider: providerName,
+        aimlapi_api_key: settingsData.api?.api_keys?.aimlapi || '',
         dashscope_api_key: settingsData.api?.api_keys?.dashscope || '',
         openai_api_key: settingsData.api?.api_keys?.openai || '',
         openai_base_url: localPreset || providerName === 'dashscope' ? '' : savedBaseUrl,
@@ -199,6 +202,7 @@ const SettingsPage: React.FC = () => {
         service: { host: '127.0.0.1', port: 8000, max_memory_usage: 2048 },
         api: {
           api_keys: {
+            aimlapi: values.aimlapi_api_key || keys.aimlapi || '',
             dashscope: values.dashscope_api_key || keys.dashscope || '',
             openai: values.openai_api_key || keys.openai || '',
             gemini: values.gemini_api_key || keys.gemini || '',
