@@ -12,7 +12,7 @@
 
 | 提供商 | 显示名称 | 主要模型 | 特点 |
 |--------|----------|----------|------|
-| `aimlapi` | AI/ML API | openai/gpt-6-luna, anthropic/claude-sonnet-5, google/gemini-3.8-flash | 聚合网关：一个 key 打通 300+ 对话模型，按 `厂商/型号` 命名 |
+| `aimlapi` | AI/ML API | openai/gpt-6-luna, openai/gpt-6.1-sol, anthropic/claude-sonnet-5.5 | 聚合网关：一个 key 打通 300+ 对话模型，按 `厂商/型号` 命名 |
 | `dashscope` | 阿里通义千问 | qwen-plus, qwen-max, qwen-turbo | 国内访问稳定，中文理解好 |
 | `openai` | OpenAI | gpt-3.5-turbo, gpt-4, gpt-4-turbo | 支持兼容接口与自定义 Base URL |
 | `gemini` | Google Gemini | gemini-2.5-flash, gemini-1.5-pro | 多模态支持，上下文长 |

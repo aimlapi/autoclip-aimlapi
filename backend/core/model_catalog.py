@@ -21,8 +21,8 @@ CURATED_MODELS: Dict[str, List[str]] = {
     # AI/ML API 是聚合网关：一个 key 覆盖下面各家，型号名带厂商前缀（openai/…、anthropic/…）。
     "aimlapi": [
         "openai/gpt-6-luna",
-        "openai/gpt-6-sol",
-        "anthropic/claude-sonnet-5",
+        "openai/gpt-6.1-sol",
+        "anthropic/claude-sonnet-5.5",
         "google/gemini-3.8-flash",
         "deepseek/deepseek-v4-pro",
         "moonshot/kimi-k3",

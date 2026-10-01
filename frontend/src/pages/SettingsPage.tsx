@@ -59,7 +59,7 @@ type DashscopeRegion = 'cn' | 'intl'
 
 // 后端 /available-models 失败时的兜底；与 backend/core/model_catalog.py 对齐
 const FALLBACK_CATALOG: Record<string, string[]> = {
-  aimlapi: ['openai/gpt-6-luna', 'openai/gpt-6-sol', 'anthropic/claude-sonnet-5', 'google/gemini-3.8-flash', 'deepseek/deepseek-v4-pro', 'moonshot/kimi-k3', 'zhipu/glm-5.2', 'alibaba/qwen3.7-max'],
+  aimlapi: ['openai/gpt-6-luna', 'openai/gpt-6.1-sol', 'anthropic/claude-sonnet-5.5', 'google/gemini-3.8-flash', 'deepseek/deepseek-v4-pro', 'moonshot/kimi-k3', 'zhipu/glm-5.2', 'alibaba/qwen3.7-max'],
   dashscope: ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus', 'qwen-plus', 'qwen-plus-latest', 'qwen-max', 'qwen-max-latest', 'qwen-flash'],
   openai: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano'],
   gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash'],
