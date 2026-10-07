@@ -67,6 +67,7 @@ AutoClip 是本地运行的 AI 切片工具：字幕（自带 SRT 或本地 Whis
 autoclip run talk.mp4 --json                          # 用桌面应用里的模型配置
 autoclip run talk.mp4 --srt talk.srt --min-score 0.5 --json
 autoclip run talk.mp4 --provider ollama --json        # 本地 Ollama，无需 key
+autoclip run talk.mp4 --provider aimlapi --api-key <aimlapi-key>   # 一个 key 300+ 模型；--model 可换成 anthropic/claude-sonnet-5.5 等
 autoclip run talk.mp4 --provider openai --base-url https://api.deepseek.com/v1 --model deepseek-chat --api-key sk-...
 autoclip doctor --json                                # 体检
 autoclip list --json / autoclip show <project_id> --json

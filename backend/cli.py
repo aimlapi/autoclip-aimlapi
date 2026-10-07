@@ -230,6 +230,7 @@ def cmd_providers(args: argparse.Namespace) -> int:
     from backend.core.llm_manager import get_llm_manager
 
     rows = [
+        ("aimlapi", "AI/ML API", "需要 key；聚合网关，一个 key 300+ 对话模型，型号按 厂商/型号 命名"),
         ("dashscope", "阿里通义千问", "需要 key；国内直连，qwen-plus 性价比高"),
         ("openai", "OpenAI / 兼容接口", "需要 key；--base-url 可指向 DeepSeek / 智谱 / OpenRouter / vLLM"),
         ("gemini", "Google Gemini", "需要 key"),
