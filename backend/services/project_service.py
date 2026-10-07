@@ -68,13 +68,14 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
         
         return self.update(project_id, **orm_data)
     
-    def latest_error_message(self, project, status=None) -> Optional[str]:
-        """项目失败时的错误文本：最近一条任务的 Task.error_message，其次 project_metadata.last_error（CLI 路径）。
+    def latest_failure(self, project, status=None):
+        """失败文本和稳定错误码。文本来自最近一条任务，其次 project_metadata.last_error（CLI 路径）。
+        错误码来自任务 result_data.error_code，其次 metadata.last_error_code。
         Project 表没有 error_message 列。"""
         status = status if status is not None else getattr(project, 'status', None)
         status_value = getattr(status, "value", status)
         if str(status_value).lower() != "failed":
-            return None
+            return None, None
         from ..models.task import Task
         project_id = str(getattr(project, 'id', ''))
         task = (
@@ -84,9 +85,20 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             .first()
         )
         if task and task.error_message:
-            return task.error_message
+            data = getattr(task, "result_data", None)
+            code = data.get("error_code") if isinstance(data, dict) else None
+            return task.error_message, code or None
         meta = getattr(project, 'project_metadata', None) or {}
-        return meta.get("last_error") or None
+        return meta.get("last_error") or None, meta.get("last_error_code") or None
+
+    def latest_error_message(self, project, status=None) -> Optional[str]:
+        """项目失败时的错误文本。Project 表没有 error_message 列。"""
+        message, _code = self.latest_failure(project, status)
+        return message
+
+    def latest_error_code(self, project, status=None) -> Optional[str]:
+        _message, code = self.latest_failure(project, status)
+        return code
 
     def get_project_with_stats(self, project_id: str) -> Optional[ProjectResponse]:
         """Get project with statistics."""
@@ -94,18 +106,26 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
         if not project:
             return None
         
+        from backend.services.studio.project_completion import sync_project_completion
+        sync_project_completion(project_id, self.db)
+
         # Get actual statistics from database
         from ..models.clip import Clip
         from ..models.collection import Collection
         from ..models.task import Task
         
         total_clips = self.db.query(Clip).filter(Clip.project_id == project_id).count()
+        completed_variants = (project.processing_config or {}).get('studio_completed_variant_count', 0)
+        if isinstance(completed_variants, int):
+            total_clips = max(total_clips, completed_variants)
         total_collections = self.db.query(Collection).filter(Collection.project_id == project_id).count()
         total_tasks = self.db.query(Task).filter(Task.project_id == project_id).count()
         
         # Convert to response schema
+        error_message, error_code = self.latest_failure(project)
         return ProjectResponse(
-            error_message=self.latest_error_message(project),
+            error_message=error_message,
+            error_code=error_code,
             id=str(getattr(project, 'id', '')),
             name=str(getattr(project, 'name', '')),
             description=str(getattr(project, 'description', '')) if getattr(project, 'description', None) is not None else None,
@@ -130,6 +150,12 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
         filters: Optional[ProjectFilter] = None
     ) -> ProjectListResponse:
         """Get paginated projects with filtering."""
+        # Recover completed visual imports from older releases before filtering.
+        from backend.services.studio.project_completion import sync_project_completion
+        for active in self.repository.get_processing_projects():
+            if (active.processing_config or {}).get('smart_import'):
+                sync_project_completion(str(active.id), self.db)
+
         # Convert filters to dict
         filter_dict = {}
         if filters:
@@ -148,11 +174,16 @@ class ProjectService(BaseService[Project, ProjectCreate, ProjectUpdate, ProjectR
             
             project_id = str(project.id)
             total_clips = self.db.query(Clip).filter(Clip.project_id == project_id).count()
+            completed_variants = (project.processing_config or {}).get('studio_completed_variant_count', 0)
+            if isinstance(completed_variants, int):
+                total_clips = max(total_clips, completed_variants)
             total_collections = self.db.query(Collection).filter(Collection.project_id == project_id).count()
             total_tasks = self.db.query(Task).filter(Task.project_id == project_id).count()
             
+            error_message, error_code = self.latest_failure(project)
             project_responses.append(ProjectResponse(
-                error_message=self.latest_error_message(project),
+                error_message=error_message,
+                error_code=error_code,
                 id=str(getattr(project, 'id', '')),
                 name=str(getattr(project, 'name', '')),
                 description=str(getattr(project, 'description', '')) if getattr(project, 'description', None) is not None else None,

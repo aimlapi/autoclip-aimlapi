@@ -1,7 +1,11 @@
+import { socialPublishObserved, socialPublishOutcome } from '../analytics/studio'
+import { workflow } from '../analytics/observer'
 import i18n, { t } from '../i18n'
 import { useTranslation } from 'react-i18next'
 import React, { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { studioApi } from '../features/studio/api'
+import { outputVariantPublishTarget } from '../features/studio/outputVariantPublish'
 import { projectApi } from '../services/api'
 import { Btn, Icon, ProgressLine, Row, Segmented, StatusDot } from '../ui'
 import { openExternalLink } from '../utils/externalLinks'
@@ -69,6 +73,9 @@ function defaultWhen(): string {
 const PublishClipPage: React.FC = () => {
   useTranslation()
   const { id: projectId = '', clipId = '' } = useParams()
+  const studioJobId = /^studio-[a-f0-9]{32}$/.test(clipId) ? clipId.slice(7) : null
+  const variantTarget = outputVariantPublishTarget(useLocation().search)
+  const [studioRevision, setStudioRevision] = useState<number>()
   const navigate = useNavigate()
   const runId = useRef(0)
 
@@ -116,13 +123,30 @@ const PublishClipPage: React.FC = () => {
           try { clips = await projectApi.getClips(projectId) } catch { clips = [] }
         }
         const clip = clips.find((item) => item.id === clipId)
-        const nextTitle = clip?.generated_title || clip?.title || ''
+        let nextTitle = clip?.generated_title || clip?.title || ''
+        let coverSlot = 'bilibili'
+        if (studioJobId) {
+          const workspace = await studioApi.get(projectId)
+          if (cancelled || runId.current !== session) return
+          const exported = workspace.jobs.find(job => job.job_id === studioJobId && job.status === 'completed')
+          if (!exported) throw new Error(t('成片尚未完成或不存在，请返回项目重新导出'))
+          nextTitle = exported.title
+          setStudioRevision(exported.revision)
+          // An automatic output arrives with its publish kit: start from its copy and cover.
+          const variant = (workspace.output_variants || []).find(item => item.id === variantTarget.uploadPost)
+          if (variant?.post) {
+            nextTitle = variant.post.title || nextTitle
+            setTitle(variant.post.title)
+            setDescription([variant.post.description, variant.post.tags.map(tag => `#${tag}`).join(' ')].filter(Boolean).join('\n\n'))
+          }
+          if (variant && !['bilibili', 'youtube_long', 'original'].includes(variant.strategy_id)) coverSlot = 'douyin'
+        }
         setClipTitle(nextTitle)
         setCoverTitle(nextTitle)
         setConfigured(cfg.configured)
         setBiliConfigured(bili.configured)
         try {
-          const existing = await coverApi.get(projectId, clipId, 'bilibili')
+          const existing = await coverApi.get(projectId, clipId, coverSlot)
           if (!cancelled && runId.current === session && existing.ok && existing.url) {
             setCover(existing)
             if (existing.title) setCoverTitle(existing.title)
@@ -150,7 +174,7 @@ const PublishClipPage: React.FC = () => {
     }
     void load()
     return () => { cancelled = true }
-  }, [projectId, clipId])
+  }, [projectId, clipId, studioJobId])
 
   const chooseUser = (next: string) => {
     setUser(next)
@@ -161,6 +185,14 @@ const PublishClipPage: React.FC = () => {
   const toggle = (platform: string) => {
     setSelected((cur) => cur.includes(platform) ? cur.filter((p) => p !== platform) : [...cur, platform])
   }
+
+  // Covers are on by default: make one as soon as the page is ready so the user sees it instead of an empty box.
+  const autoCover = useRef(false)
+  useEffect(() => {
+    if (loading || error || cover || coverBusy || autoCover.current) return
+    autoCover.current = true
+    void generateCover()
+  }, [loading, error, cover, coverBusy])
 
   const generateCover = async () => {
     if (!projectId || !clipId || coverBusy) return
@@ -235,12 +267,16 @@ const PublishClipPage: React.FC = () => {
     setPhase('running')
     setPercent(12)
     const tracks: Track[] = []
+    const telemetryGeneration = workflow.generation()
+    const telemetryEnabled = workflow.active(telemetryGeneration)
+    const observed = new Set<string>()
     try {
       if (overseas.length) {
         const started = await uploadPostApi.start(projectId, clipId, {
           platforms: overseas,
           user,
           preset: renderPreset(overseas),
+          output_variant_id: variantTarget.uploadPost,
           title: title.trim() || undefined,
           description: description.trim() || undefined,
           subtitles,
@@ -253,6 +289,7 @@ const PublishClipPage: React.FC = () => {
       }
       if (sendBili) {
         const started = await bilibiliApi.start(projectId, clipId, {
+          output_variant_id: variantTarget.bilibili,
           title: title.trim() || undefined,
           description: description.trim() || undefined,
           subtitles,
@@ -290,6 +327,13 @@ const PublishClipPage: React.FC = () => {
           : await bilibiliApi.job(track.jobId)
         if (runId.current !== session) return
         const settled = settleJob(job, later)
+        if (!settled.pending && !observed.has(track.jobId)) {
+          observed.add(track.jobId)
+          if (telemetryEnabled) socialPublishObserved(telemetryGeneration, {
+            ...workflow.context(projectId, studioJobId || undefined), source_type: studioJobId ? 'studio' : 'legacy', gateway: track.kind,
+            outcome: socialPublishOutcome(job.status, settled.scheduled, settled.results),
+          })
+        }
         if (settled.pending) pending = true
         if (settled.failed) failed = true
         if (settled.scheduled) scheduled = true
@@ -323,7 +367,7 @@ const PublishClipPage: React.FC = () => {
     setPercent(8)
     try {
       const started = await projectApi.startClipExport(projectId, clipId, {
-        preset,
+        preset: studioJobId ? 'original' : preset,
         subtitles,
         title_card: titleCard,
       })
@@ -464,15 +508,15 @@ const PublishClipPage: React.FC = () => {
             </Row>
           </>
         )}
-        {!loading && (
+        {!loading && !studioJobId && (
           <>
-            <Row label={t("字幕")} hint={t("从原字幕切出本段并烧进画面")}>
+            <Row label={t("字幕")} hint={t("把这段的字幕压进画面")}>
               <Segmented size="sm" ariaLabel={t("字幕")} value={subtitles ? 'on' : 'off'} onChange={(v) => setSubtitles(v === 'on')}
-                options={[{ value: 'on', label: t("烧录") }, { value: 'off', label: t("不要") }]} />
+                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不显示") }]} />
             </Row>
-            <Row label={t("标题卡")} hint={t("片头约 4 秒显示切片标题")}>
-              <Segmented size="sm" ariaLabel={t("标题卡")} value={titleCard ? 'on' : 'off'} onChange={(v) => setTitleCard(v === 'on')}
-                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不要") }]} />
+            <Row label={t("片头标题")} hint={t("片头约 4 秒显示标题文字")}>
+              <Segmented size="sm" ariaLabel={t("片头标题")} value={titleCard ? 'on' : 'off'} onChange={(v) => setTitleCard(v === 'on')}
+                options={[{ value: 'on', label: t("显示") }, { value: 'off', label: t("不显示") }]} />
             </Row>
           </>
         )}
@@ -480,7 +524,7 @@ const PublishClipPage: React.FC = () => {
 
       {!loading && (
         <p className="ac-sub" style={{ marginTop: 16 }}>
-          {t("成片跟着账号走：有竖屏账号就渲成 9:16，只发 B 站时按横屏，只有横屏海外账号时按原画。")}
+          {studioJobId ? t('发布已导出的 V{{revision}} 成片，保留画幅、文字和声音。需要修改时，请返回编辑器另行导出。', { revision: studioRevision ?? '—' }) : t("成片跟着账号走：有竖屏账号就渲成 9:16，只发 B 站时按横屏，只有横屏海外账号时按原画。")}
         </p>
       )}
       {busy && <div style={{ marginTop: 16 }}><ProgressLine percent={percent} /></div>}

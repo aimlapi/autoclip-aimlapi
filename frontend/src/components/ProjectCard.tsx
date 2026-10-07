@@ -1,15 +1,19 @@
 import { t } from '../i18n'
 import { useTranslation } from 'react-i18next'
 import React, { useState, useEffect } from 'react'
-import { Card, Button, Space, Typography, Popconfirm, message, Tooltip } from 'antd'
-import { PlayCircleOutlined, DeleteOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined } from '@ant-design/icons'
+import { message } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import { Project } from '../store/useProjectStore'
 import { projectApi } from '../services/api'
+import { studioApi } from '../features/studio/api'
 import { UnifiedStatusBar } from './UnifiedStatusBar'
 import FeedbackDialog from './FeedbackDialog'
 import { useSimpleProgressStore } from '../stores/useSimpleProgressStore'
-import { Btn } from '../ui'
+import { Btn, Dialog, Icon, StatusDot } from '../ui'
+import { classifyLlmKeyFailure } from '../utils/llmFailure'
+import { classifySubtitleFailure } from '../utils/subtitleFailure'
+import { classifyTimelineEmpty } from '../utils/timelineFailure'
+import { isSourceDownloading, readDownloadProgress } from '../utils/downloadProgress'
 // import { 
 //   getProjectStatusConfig, 
 //   calculateProjectProgress, 
@@ -26,33 +30,6 @@ dayjs.extend(relativeTime)
 dayjs.extend(timezone)
 dayjs.extend(utc)
 dayjs.locale('zh-cn')
-
-// 添加CSS动画样式
-const pulseAnimation = `
-  @keyframes pulse {
-    0% {
-      opacity: 1;
-      transform: scale(1);
-    }
-    50% {
-      opacity: 0.5;
-      transform: scale(1.1);
-    }
-    100% {
-      opacity: 1;
-      transform: scale(1);
-    }
-  }
-`
-
-// 将样式注入到页面
-if (typeof document !== 'undefined') {
-  const style = document.createElement('style')
-  style.textContent = pulseAnimation
-  document.head.appendChild(style)
-}
-
-const { Text } = Typography
 
 // Tracks which project ids have already had a best-effort auto-start, surviving
 // component remounts (the list briefly unmounts while HomePage shows its
@@ -71,23 +48,23 @@ interface ProjectCardProps {
 const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, onClick }) => {
   useTranslation()
   const navigate = useNavigate()
+  const creative = project.settings?.creative || project.processing_config?.creative
+  const isVisual = ['highlight', 'promo'].includes(creative?.goal)
+  const isManaged = isVisual || !!project.settings?.smart_import || !!project.processing_config?.smart_import
   const [videoThumbnail, setVideoThumbnail] = useState<string | null>(null)
   const [thumbnailLoading, setThumbnailLoading] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
 
   // 获取分类信息
+  const isExample = !!(project.settings?.example || project.processing_config?.example)
   const getCategoryInfo = (category?: string) => {
-    const categoryMap: Record<string, { name: string; icon: string; color: string }> = {
-      'default': { name: t("默认"), icon: '🎬', color: '#4facfe' },
-      'knowledge': { name: t("知识科普"), icon: '📚', color: '#52c41a' },
-      'business': { name: t("商业财经"), icon: '💼', color: '#faad14' },
-      'opinion': { name: t("观点评论"), icon: '💭', color: '#722ed1' },
-      'experience': { name: t("经验分享"), icon: '🌟', color: '#13c2c2' },
-      'speech': { name: t("演讲脱口秀"), icon: '🎤', color: '#eb2f96' },
-      'content_review': { name: t("内容解说"), icon: '🎭', color: '#f5222d' },
-      'entertainment': { name: t("娱乐内容"), icon: '🎪', color: '#fa8c16' }
+    const categoryMap: Record<string, string> = {
+      default: t("默认"), knowledge: t("知识科普"), business: t("商业财经"),
+      opinion: t("观点评论"), experience: t("经验分享"), speech: t("演讲脱口秀"),
+      content_review: t("内容解说"), entertainment: t("娱乐内容"),
     }
-    return categoryMap[category || 'default'] || categoryMap['default']
+    return categoryMap[category || 'default'] || categoryMap.default
   }
 
   // 缩略图缓存管理
@@ -124,12 +101,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
         video.preload = 'metadata'
         
         // 尝试多个可能的视频文件路径
-        const possiblePaths = [
-          'input/input.mp4',
-          'input.mp4',
-          project.video_path,
-          `${project.video_path}/input.mp4`
-        ].filter(Boolean)
+        const possiblePaths = [studioApi.source(project.id)]
         
         let videoLoaded = false
         
@@ -137,7 +109,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
           if (videoLoaded) break
           
           try {
-            const videoUrl = projectApi.getProjectFileUrl(project.id, path)
+            const videoUrl = path
             console.log('尝试加载视频:', videoUrl)
             
             await new Promise((resolve, reject) => {
@@ -228,12 +200,14 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
     }
     
     generateThumbnail()
-  }, [project.id, project.video_path, thumbnailCacheKey])
+  }, [project.id, project.video_path, project.thumbnail, thumbnailCacheKey])
 
-  // 检查是否是下载状态 - 根据下载进度判断
-  const downloadProgress = project.processing_config?.download_progress || 0
-  const isDownloading = project.status === 'pending' && downloadProgress > 0 && downloadProgress < 100
-  const isImporting = project.status === 'pending' && !isDownloading
+  // 片源进度在接口的 settings 上（后端字段名 processing_config）。
+  // 读错字段时进度恒为 0，下面会把所有 pending 画成 5%。
+  const downloadProgress = readDownloadProgress(project)
+  const isDownloading = isSourceDownloading(project)
+  const awaitingConfirmation = project.status === 'pending' && !!(project.settings?.awaiting_confirmation || project.processing_config?.awaiting_confirmation)
+  const isImporting = project.status === 'pending' && !isDownloading && !awaitingConfirmation
   
   // 状态标准化处理
   const normalizedStatus = project.status === 'error' ? 'failed' : 
@@ -259,7 +233,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
   // 流水线，所以这里只需做一次「尽力而为」的启动即可。
   useEffect(() => {
     if (
-      project.status === 'pending' &&
+      !isManaged && project.status === 'pending' &&
       !isDownloading &&
       !autoStartedProjectIds.has(project.id)
     ) {
@@ -271,7 +245,7 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
       // toast/reload path.
       handleRetry({ silent: true })
     }
-  }, [project.status, project.id, isDownloading])
+  }, [project.status, project.id, isDownloading, isManaged])
   
   // 计算进度百分比
   const progressPercent = project.status === 'completed' ? 100 : 
@@ -289,7 +263,14 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
     project_id: project.id,
     stage: failedProgress?.stage,
     error_message: project.error_message || failedProgress?.message || undefined,
+    error_code: project.error_code || undefined,
   }
+  const failureText = project.error_message || failedProgress?.message
+  const timelineEmpty = classifyTimelineEmpty(failureText, project.error_code)
+  const llmKeyFailure = !timelineEmpty && classifyLlmKeyFailure(failureText, project.error_code)
+  const subtitleFailure = timelineEmpty
+    ? null
+    : classifySubtitleFailure(failureText, project.error_code)
 
   const handleRetry = async (opts?: { silent?: boolean }) => {
     if (isRetrying) return
@@ -297,7 +278,10 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
     setIsRetrying(true)
     try {
       // 对于PENDING状态的项目，使用startProcessing；对于其他状态，使用retryProcessing
-      if (project.status === 'pending') {
+      if (isManaged) {
+        navigate(`/import/${project.id}`)
+        return
+      } else if (project.status === 'pending') {
         await projectApi.startProcessing(project.id)
       } else {
         await projectApi.retryProcessing(project.id)
@@ -319,347 +303,74 @@ const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onRetry, o
     }
   }
 
+  const openProject = () => {
+    if (!isManaged && project.status === 'pending') {
+      message.warning(t("项目正在导入中，请稍后再查看详情"))
+      return
+    }
+    if (!isManaged && project.status === 'processing') {
+      message.warning(t("项目处理中，请完成后再查看"))
+      return
+    }
+    if (awaitingConfirmation) navigate(`/import/${project.id}`)
+    else if (onClick) onClick()
+    else navigate(`/project/${project.id}`)
+  }
+
   return (
     <>
-    <Card
-      hoverable
-      className="project-card"
-      style={{
-        width: '100%',
-        borderRadius: '16px',
-        overflow: 'hidden',
-        background: 'var(--ac-card)',
-        border: '1px solid var(--ac-line)',
-        boxShadow: 'none',
-        transition: 'all 0.2s ease',
-        cursor: 'pointer',
-        marginBottom: '0px'
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.transform = 'translateY(-2px)'
-        e.currentTarget.style.boxShadow = 'var(--ac-shadow)'
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.transform = 'translateY(0)'
-        e.currentTarget.style.boxShadow = 'none'
-      }}
-      bodyStyle={{
-        padding: '18px 20px 20px',
-        background: 'transparent',
-        display: 'flex',
-        flexDirection: 'column'
-      }}
-      cover={
-        <div
-          style={{
-            height: 160,
-            position: 'relative',
-            background: videoThumbnail
-              ? `url(${videoThumbnail}) center/cover`
-              : 'var(--ac-thumb)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            overflow: 'hidden'
-          }}
-          onClick={() => {
-            // 导入中状态的项目不能点击进入详情页
-            if (project.status === 'pending') {
-              message.warning(t("项目正在导入中，请稍后再查看详情"))
-              return
-            }
-            
-            // 处理中状态的项目不能点击进入详情页
-            if (project.status === 'processing') {
-              message.warning(t("项目处理中，请完成后再查看"))
-              return
-            }
-            
-            if (onClick) {
-              onClick()
-            } else {
-              navigate(`/project/${project.id}`)
-            }
-          }}
-        >
-          {/* 缩略图加载状态 */}
-          {thumbnailLoading && (
-            <div style={{ textAlign: 'center', color: 'var(--ac-muted)' }}>
-              <LoadingOutlined style={{ fontSize: '22px', marginBottom: '4px' }} />
-              <div style={{ fontSize: '12px' }}>{t("生成封面中…")}</div>
-            </div>
-          )}
-
-          {/* 无缩略图时的默认显示 */}
-          {!videoThumbnail && !thumbnailLoading && (
-            <PlayCircleOutlined style={{ fontSize: '32px', color: 'var(--ac-muted)' }} />
-          )}
-          
-          {/* 分类标签 - 左上角 */}
-          {project.video_category && project.video_category !== 'default' && (
-            <div style={{
-              position: 'absolute',
-              top: '8px',
-              left: '8px'
-            }}>
-              <span className="ac-tag ac-tag--sans" style={{ position: 'static', fontSize: 11 }}>
-                {getCategoryInfo(project.video_category).name}
-              </span>
-            </div>
-          )}
-          
-          {/* 移除右上角状态指示器 - 可读性差且冗余 */}
-          
-          {/* 更新时间和操作按钮 - 移动到封面底部 */}
-          <div style={{
-            position: 'absolute',
-            bottom: '0',
-            left: '0',
-            right: '0',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'flex-end',
-            background: 'linear-gradient(to top, rgba(0,0,0,0.42), rgba(0,0,0,0))',
-            borderRadius: '0',
-            padding: '10px 12px',
-            height: '52px'
-          }}>
-            <Text style={{ fontSize: '12px', color: 'rgba(255, 255, 255, 0.92)' }}>
-              {dayjs(project.created_at).tz('Asia/Shanghai').fromNow()}
-            </Text>
-            
-            {/* 操作按钮 */}
-            <div 
-              className="card-action-buttons"
-              style={{
-                display: 'flex',
-                gap: '4px',
-                opacity: 0,
-                transition: 'opacity 0.3s ease'
-              }}
-            >
-              {/* 失败状态：只显示重试和删除按钮 */}
-              {normalizedStatus === 'failed' ? (
-                <>
-                  <Button
-                    type="text"
-                    icon={<ReloadOutlined />}
-                    loading={isRetrying}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleRetry()
-                    }}
-                    style={{
-                      height: '22px',
-                      width: '22px',
-                      borderRadius: '999px',
-                      color: 'rgba(255,255,255,0.9)',
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(20,20,19,0.45)',
-                      padding: 0,
-                      minWidth: '22px',
-                      fontSize: '10px'
-                    }}
-                  />
-                  
-                  <Popconfirm
-                    title={t("确定要删除这个项目吗？")}
-                    description={t("删除后无法恢复")}
-                    onConfirm={(e) => {
-                      e?.stopPropagation()
-                      onDelete(project.id)
-                    }}
-                    onCancel={(e) => {
-                      e?.stopPropagation()
-                    }}
-                    okText={t("确定")}
-                    cancelText={t("取消")}
-                  >
-                    <Button
-                      type="text"
-                      icon={<DeleteOutlined />}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                      }}
-                      style={{
-                      height: '22px',
-                      width: '22px',
-                      borderRadius: '999px',
-                      color: 'rgba(255,255,255,0.9)',
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(20,20,19,0.45)',
-                      padding: 0,
-                      minWidth: '22px',
-                      fontSize: '10px'
-                    }}
-                    />
-                  </Popconfirm>
-                </>
-              ) : (
-                /* 其他状态：显示下载、重试和删除按钮 */
-                <>
-                  <Space size={4}>
-                    {/* 重试按钮 - 在处理中和等待中状态显示，允许用户重新提交任务 */}
-                    {(normalizedStatus === 'processing' || normalizedStatus === 'importing' || project.status === 'pending') && (
-                      <Tooltip title={project.status === 'pending' ? t("开始处理") : t("重新提交任务")}>
-                        <Button
-                          type="text"
-                          icon={<ReloadOutlined />}
-                          loading={isRetrying}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleRetry()
-                          }}
-                          style={{
-                      height: '22px',
-                      width: '22px',
-                      borderRadius: '999px',
-                      color: 'rgba(255,255,255,0.9)',
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(20,20,19,0.45)',
-                      padding: 0,
-                      minWidth: '22px',
-                      fontSize: '10px'
-                    }}
-                        />
-                      </Tooltip>
-                    )}
-                    
-                    {/* 下载按钮 - 仅在完成状态显示 */}
-                    {normalizedStatus === 'completed' && (
-                      <Button
-                        type="text"
-                        icon={<DownloadOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          // 实现下载功能
-                          message.info(t("下载功能开发中..."))
-                        }}
-                        style={{
-                      height: '22px',
-                      width: '22px',
-                      borderRadius: '999px',
-                      color: 'rgba(255,255,255,0.9)',
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(20,20,19,0.45)',
-                      padding: 0,
-                      minWidth: '22px',
-                      fontSize: '10px'
-                    }}
-                      />
-                    )}
-                    
-                    {/* 删除按钮 */}
-                    <Popconfirm
-                      title={t("确定要删除这个项目吗？")}
-                      description={t("删除后无法恢复")}
-                      onConfirm={(e) => {
-                        e?.stopPropagation()
-                        onDelete(project.id)
-                      }}
-                      onCancel={(e) => {
-                        e?.stopPropagation()
-                      }}
-                      okText={t("确定")}
-                      cancelText={t("取消")}
-                    >
-                      <Button
-                        type="text"
-                        icon={<DeleteOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                        }}
-                        style={{
-                      height: '22px',
-                      width: '22px',
-                      borderRadius: '999px',
-                      color: 'rgba(255,255,255,0.9)',
-                      border: '1px solid rgba(255,255,255,0.25)',
-                      background: 'rgba(20,20,19,0.45)',
-                      padding: 0,
-                      minWidth: '22px',
-                      fontSize: '10px'
-                    }}
-                      />
-                    </Popconfirm>
-                  </Space>
-                 </>
-               )}
-            </div>
+      <article className="ac-card ac-project-card">
+        <div className="ac-card-thumb" style={{ backgroundImage: videoThumbnail ? `url(${videoThumbnail})` : undefined }}>
+          <button type="button" className="ac-project-open" aria-label={project.name} onClick={openProject}>
+            {!videoThumbnail && <Icon.Play size={30} />}
+            {thumbnailLoading && <span className="ac-project-thumbnail-loading">{t("生成封面中…")}</span>}
+          </button>
+          <div className="ac-project-tags">
+            {isExample && <span className="ac-tag ac-tag--sans">{t("示例")}</span>}
+            {project.video_category && project.video_category !== 'default' && <span className="ac-tag ac-tag--sans">{getCategoryInfo(project.video_category)}</span>}
           </div>
         </div>
-      }
-    >
-      <div style={{ padding: '0', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-        <div>
-          {/* 项目名称 - 始终在顶部 */}
-          <div style={{ marginBottom: '12px', position: 'relative' }}>
-            <Tooltip title={project.name} placement="top">
-              <Text 
-                strong 
-                style={{ 
-                  fontSize: '13px', 
-                  color: '#ffffff',
-                  fontWeight: 600,
-                  lineHeight: '16px',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  cursor: 'help',
-                  height: '32px'
-                }}
-              >
-                {project.name}
-              </Text>
-            </Tooltip>
-          </div>
-          
-          {/* 状态和统计信息 — Calm Premium，见 DESIGN.md */}
-          {(normalizedStatus === 'importing' || normalizedStatus === 'downloading' || normalizedStatus === 'processing' || normalizedStatus === 'failed') ? (
-            // 进行中 / 失败：细进度线或终态点，占满宽度
-            <div style={{ marginBottom: '2px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <UnifiedStatusBar
-                projectId={project.id}
-                status={normalizedStatus}
-                downloadProgress={progressPercent}
-                onStatusChange={(newStatus) => {
-                  console.log(`项目 ${project.id} 状态变化: ${normalizedStatus} -> ${newStatus}`)
-                }}
-                onDownloadProgressUpdate={(progress) => {
-                  console.log(`项目 ${project.id} 下载进度更新: ${progress}%`)
-                }}
-              />
-              {normalizedStatus === 'failed' && (
-                // 失败态：重试 + 反馈（反馈自动带上阶段 / 错误 / 版本 / 模型上下文）
-                <div style={{ display: 'flex', gap: 2, flex: '0 0 auto' }} onClick={(e) => e.stopPropagation()}>
-                  <Btn variant="text" size="sm" style={{ height: 26, padding: '0 8px', fontSize: 12.5 }} loading={isRetrying} onClick={() => handleRetry()}>{t("重试")}</Btn>
-                  <Btn variant="text" size="sm" style={{ height: 26, padding: '0 8px', fontSize: 12.5 }} onClick={() => setFeedbackOpen(true)}>{t("反馈")}</Btn>
-                </div>
-              )}
-            </div>
+        <div className="ac-card-body">
+          <button type="button" className="ac-project-title" onClick={openProject} title={project.name}>
+            <span className="ac-card-title">{project.name}</span>
+          </button>
+          {awaitingConfirmation ? (
+            <div className="ac-project-status"><StatusDot tone="muted" label={t("待确认制作类型")} /><Btn size="sm" onClick={() => navigate(`/import/${project.id}`)}>{t("查看建议")}</Btn></div>
+          ) : isManaged && project.status === 'processing' ? (
+            <StatusDot tone="accent" label={t("制作中 · 查看进度")} />
           ) : (
-            // 已完成：● 已完成  +  灰色 mono 元信息（N 切片 · M 合集）
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
-              <UnifiedStatusBar
-                projectId={project.id}
-                status={normalizedStatus}
-                downloadProgress={progressPercent}
-                onStatusChange={() => {}}
-              />
-              <div style={{ color: 'var(--ac-muted)', fontSize: '12.5px', whiteSpace: 'nowrap' }}>
-                {t("切片数量", { count: project.total_clips || 0 })}<span style={{ margin: '0 6px' }}>·</span>
-                {t("合集数量", { count: project.total_collections || 0 })}</div>
+            <UnifiedStatusBar projectId={project.id} status={normalizedStatus} downloadProgress={progressPercent} />
+          )}
+          {normalizedStatus === 'completed' && (
+            <div className="ac-project-counts ac-mono">
+              {isVisual ? t('成片草稿数量', { count: project.settings?.studio_draft_count || project.processing_config?.studio_draft_count || 0 }) : <>{t("切片数量", { count: project.total_clips || 0 })}<span> · </span>{t("合集数量", { count: project.total_collections || 0 })}</>}
             </div>
           )}
-
-          {/* 详细进度显示已隐藏 - 只在状态块中显示百分比 */}
-
+          {normalizedStatus === 'failed' && failureText && (
+            <div className="ac-empty ac-project-error" role="alert">
+              <span className="ac-mono">{failureText}</span>
+            </div>
+          )}
+          {normalizedStatus === 'failed' && (
+            <div className="ac-project-recovery">
+              {subtitleFailure && <Btn variant="text" size="sm" onClick={() => navigate('/settings?section=speech')}>{t("转写设置")}</Btn>}
+              {llmKeyFailure && <Btn variant="text" size="sm" onClick={() => navigate('/settings?section=model')}>{t("模型设置")}</Btn>}
+              <Btn variant="text" size="sm" loading={isRetrying} onClick={() => handleRetry()}>{t("重试")}</Btn>
+              <Btn variant="text" size="sm" onClick={() => setFeedbackOpen(true)}>{t("反馈")}</Btn>
+            </div>
+          )}
+          <div className="ac-card-foot">
+            <time className="meta" dateTime={project.created_at}>{dayjs(project.created_at).fromNow()}</time>
+            <div className="ac-card-actions">
+              {(normalizedStatus === 'processing' || normalizedStatus === 'importing') && !isManaged && <Btn variant="text" size="sm" loading={isRetrying} onClick={() => handleRetry()} title={t("重新提交任务")}><Icon.Refresh /></Btn>}
+              <Btn variant="danger" size="sm" onClick={() => setDeleteOpen(true)} title={t("删除")} aria-label={t("删除")}><Icon.Trash /></Btn>
+            </div>
+          </div>
         </div>
-      </div>
-    </Card>
-    <FeedbackDialog open={feedbackOpen} onClose={() => setFeedbackOpen(false)} context={failureContext} />
+      </article>
+      <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} title={t("确定要删除这个项目吗？")} description={t("删除后无法恢复")}
+        footer={<div className="right"><Btn onClick={() => setDeleteOpen(false)}>{t("取消")}</Btn><Btn variant="danger" onClick={() => { setDeleteOpen(false); onDelete(project.id) }}>{t("确定")}</Btn></div>} />
+      <FeedbackDialog open={feedbackOpen} onClose={() => setFeedbackOpen(false)} context={failureContext} />
     </>
   )
 }

@@ -33,13 +33,14 @@ export function captureBusinessEvent(name: string, properties: Properties = {}):
   if (!initialized || !isAnalyticsEnabled()) return false
   try {
     return posthog.capture(name, {
+      ...properties,
       schema_version: 2,
-      analytics_environment: import.meta.env.DEV ? 'development' : 'production',
+      app_version: import.meta.env.VITE_APP_VERSION || 'unknown',
+      analytics_environment: import.meta.env.VITE_TELEMETRY_VALIDATION === 'true' ? 'validation' : import.meta.env.DEV ? 'development' : 'production',
       runtime: '__TAURI_INTERNALS__' in window ? 'desktop' : 'web',
       entrypoint: 'ui',
       app_locale: typeof document !== 'undefined' ? document.documentElement.lang : 'unknown',
       system_locale: typeof navigator !== 'undefined' ? navigator.language : 'unknown',
-      ...properties,
     }) !== undefined
   } catch { return false }
 }
@@ -47,6 +48,7 @@ export function captureBusinessEvent(name: string, properties: Properties = {}):
 /** 是否启用了埋点（已配置 key 且用户未关闭）。 */
 export function isAnalyticsEnabled(): boolean {
   if (!POSTHOG_KEY) return false
+  if (preferenceOverride !== undefined) return preferenceOverride
   try {
     return localStorage.getItem(OPT_OUT_STORAGE_KEY) !== 'true'
   } catch {
@@ -66,6 +68,7 @@ export function initAnalytics(): void {
     }
     return
   }
+  if (!isAnalyticsEnabled()) return
 
   try {
     posthog.init(POSTHOG_KEY, {
@@ -79,6 +82,8 @@ export function initAnalytics(): void {
     capture_performance: false,
     // 隐私优先：默认不录屏（PostHog 端也需另行开启）
     disable_session_recording: true,
+    // Feature flags and remote configuration are unused; opt-out must stop all SDK requests.
+    advanced_disable_flags: true,
     // HashRouter 下手动上报 pageview（见 trackPageview）
     capture_pageview: false,
     capture_pageleave: false,
@@ -105,7 +110,8 @@ export function setAnalyticsEnabled(enabled: boolean): void {
   } catch {
     /* localStorage 不可用时忽略 */
   }
-  for (const listener of preferenceListeners) listener()
+  for (const listener of preferenceListeners) { try { listener() } catch { /* isolate observers */ } }
+  if (!initialized && enabled) initAnalytics()
   if (!initialized) return
   try {
     if (enabled) posthog.opt_in_capturing()

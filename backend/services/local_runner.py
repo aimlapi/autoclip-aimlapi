@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_CHOICES = ("dashscope", "openai", "gemini", "deepseek", "seed", "kimi", "glm", "grok", "ollama", "lmstudio")
+PROVIDER_CHOICES = ("dashscope", "openai", "gemini", "deepseek", "seed", "kimi", "glm", "grok", "infistar", "api88", "ollama", "lmstudio")
 
 
 # ---------------------------------------------------------------- environment ---
@@ -49,6 +49,10 @@ def configure_environment(data_dir: Optional[Path] = None, quiet: bool = True) -
     设定数据目录 / 数据库 / 日志相关环境变量。返回实际数据目录。
     必须在 import backend.core.database 之前调用。
     """
+    # Headless model/MCP connections need the same reset cleanup as the desktop
+    # runtime. The shim is idempotent and applies only to Windows CPython 3.13.
+    from backend.core.windows_asyncio import install_windows_proactor_cleanup
+    install_windows_proactor_cleanup()
     target = (data_dir or default_app_dir()).expanduser()
     target.mkdir(parents=True, exist_ok=True)
     (target / "logs").mkdir(parents=True, exist_ok=True)
@@ -145,7 +149,7 @@ def configure_llm(override: LLMOverride) -> Dict[str, Any]:
                 "dashscope": "dashscope_api_key", "openai": "openai_api_key",
                 "gemini": "gemini_api_key", "siliconflow": "siliconflow_api_key",
                 "deepseek": "deepseek_api_key",
-                "kimi": "kimi_api_key", "glm": "glm_api_key", "grok": "grok_api_key",
+                "kimi": "kimi_api_key", "glm": "glm_api_key", "grok": "grok_api_key", "infistar": "infistar_api_key", "api88": "api88_api_key",
                 "seed": "seed_api_key",
             }.get(provider)
             if key_field:
@@ -157,8 +161,8 @@ def configure_llm(override: LLMOverride) -> Dict[str, Any]:
     info = manager.get_current_provider_info()
     if not info.get("available"):
         raise RuntimeError(
-            f"LLM 提供商 {info.get('provider')} 未就绪：缺少 API Key（或本地服务地址）。"
-            f" 用 --api-key / --base-url 指定，或先在桌面应用设置页配置。"
+            f"LLM 提供商 {info.get('provider')} 未就绪：需要自备 API Key（或本机服务地址）。"
+            f" 用 --api-key / --base-url 指定，或到桌面应用「设置 → 模型」填写后点测试连接。"
         )
     return info
 
@@ -169,7 +173,11 @@ def check_llm_connection() -> Dict[str, Any]:
     m = get_llm_manager()
     info = m.get_current_provider_info()
     if not m.current_provider:
-        return {"ok": False, **info, "error": "未配置 API Key / 本地服务地址"}
+        return {
+            "ok": False,
+            **info,
+            "error": "未配置 API Key。需要自备密钥，到「设置 → 模型」填写提供商、密钥和模型名后再测试连接。",
+        }
     base_url = info.get("base_url")
     if base_url:
         # 本地 / 自建服务先探一下地址，避免 SDK 重试半天只留下一句「连接失败」
@@ -185,7 +193,11 @@ def check_llm_connection() -> Dict[str, Any]:
             return {"ok": False, **info, "error": f"{base_url} 不可达：{type(e).__name__}。{tip}"}
     try:
         ok = bool(m.current_provider.test_connection())
-        return {"ok": ok, **info, "error": None if ok else "连接测试失败"}
+        return {
+            "ok": ok,
+            **info,
+            "error": None if ok else "连接测试失败。请到「设置 → 模型」核对自备的密钥和模型名后再试。",
+        }
     except Exception as e:  # noqa: BLE001
         return {"ok": False, **info, "error": str(e)[:300]}
 
@@ -254,7 +266,7 @@ def _register_project(req: RunRequest, video_path: Path) -> None:
         db.close()
 
 
-def _set_project_status(project_id: str, status: str, error: Optional[str] = None) -> None:
+def _set_project_status(project_id: str, status: str, error: Optional[str] = None, error_code: Optional[str] = None) -> None:
     try:
         from backend.core.database import SessionLocal
         from backend.models.project import Project, ProjectStatus
@@ -273,6 +285,8 @@ def _set_project_status(project_id: str, status: str, error: Optional[str] = Non
                 # ProjectService.latest_error_message 会回退读它，桌面首页 / 详情页照样能看到原因
                 meta = dict(p.project_metadata or {})
                 meta["last_error"] = error[:2000]
+                if error_code:
+                    meta["last_error_code"] = error_code
                 p.project_metadata = meta
             db.commit()
         finally:
@@ -352,7 +366,7 @@ def run_pipeline(req: RunRequest, video_in_raw: Path, on_progress: Optional[Prog
         if result.get("status") == "succeeded":
             _set_project_status(req.project_id, "completed")
         else:
-            _set_project_status(req.project_id, "failed", result.get("error"))
+            _set_project_status(req.project_id, "failed", result.get("error"), result.get("error_code"))
     return result
 
 

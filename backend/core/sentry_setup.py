@@ -9,10 +9,59 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+STUDIO_ERROR_CODES = {"validation", "missing_resource", "unexpected", "timeout", "connection", "authentication", "rate_limited", "provider_error", "invalid_response", "output_truncated", "refused", "llm_not_configured", "whisper_not_installed", "whisper_install_failed", "transcription_empty", "subtitle_setup", "timeline_empty"}
+PIPELINE_STAGES = {"INGEST", "SUBTITLE", "ANALYZE", "HIGHLIGHT", "EXPORT", "DONE"}
+
+
+def studio_error_code(error: Exception) -> str:
+    from backend.services.studio.intelligence import VisionRequestError
+    from backend.pipeline.failures import PipelineFailure
+    if isinstance(error, (VisionRequestError, PipelineFailure)) and error.code in STUDIO_ERROR_CODES:
+        return error.code
+    # Local render, frame sampling and optional-runtime preparation use typed subprocess timeouts.
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout"
+    # Text rewrite/translation call the SDK directly, without a pipeline wrapper.
+    # Recognize its typed failures; unrelated filesystem/programming errors stay unexpected.
+    try:
+        from openai import APIError
+    except ImportError:
+        APIError = ()
+    if isinstance(error, APIError):
+        from backend.pipeline.failures import model_call_error_code
+        return model_call_error_code(error)
+    if isinstance(error, FileNotFoundError):
+        return "missing_resource"
+    if isinstance(error, ValueError):
+        return "validation"
+    return "unexpected"
+
+
+_PIPELINE_FAILURE_STAGES = {"INGEST": "ingest", "SUBTITLE": "subtitle", "ANALYZE": "analyze",
+                            "HIGHLIGHT": "analyze", "EXPORT": "render"}
+
+
+def studio_failure_context(error: Exception, phase: str) -> dict:
+    """Where an automatic run failed and the provider HTTP status, without messages or URLs."""
+    from backend.services.studio.intelligence import VisionRequestError
+    from backend.pipeline.failures import PipelineFailure
+    stage = phase
+    if isinstance(error, PipelineFailure):
+        stage = _PIPELINE_FAILURE_STAGES.get(error.stage, phase)
+    elif isinstance(error, VisionRequestError) and phase != "screening":
+        stage = "vision"
+    result = {"failure_stage": stage}
+    status = getattr(error, "http_status", None) or getattr(error, "status_code", None)
+    if type(status) is int and 400 <= status <= 599:
+        result["http_status"] = status
+    return result
+
 
 PRIVACY_FILE = "privacy.json"
 _initialized = False
@@ -55,7 +104,39 @@ def write_privacy(*, crash_reports: Optional[bool] = None) -> Path:
     return path
 
 
-def before_send(event: dict, _hint: dict) -> Optional[dict]:
+def _import_monitoring_fields(event: dict, hint: Optional[dict]) -> tuple[Optional[str], Optional[list[str]]]:
+    """缺字幕 / 缺密钥要单独归组。
+
+    before_send 会丢掉事件上原有的 tags 和 fingerprint，只留下异常类型。
+    配置类失败如果仍都叫 ImportProcessingError，就会和未预期故障合成一条 issue。
+    这里按异常类型写回稳定 tag；只有配置类失败覆盖 fingerprint。
+    指纹里只有 kind，没有错误正文。
+    """
+    try:
+        from backend.tasks.import_processing import (
+            fingerprint_for_import_kind,
+            import_failure_kind_for_type,
+            kind_of_exception,
+        )
+    except Exception:
+        logger.debug("导入失败分类不可用", exc_info=True)
+        return None, None
+
+    kind = None
+    if hint:
+        exc_info = hint.get("exc_info")
+        if isinstance(exc_info, tuple) and len(exc_info) >= 2 and isinstance(exc_info[1], BaseException):
+            kind = kind_of_exception(exc_info[1])
+    if not kind:
+        values = (event.get("exception") or {}).get("values") or []
+        if values and isinstance(values[-1], dict):
+            kind = import_failure_kind_for_type(str(values[-1].get("type") or ""))
+    if not kind:
+        return None, None
+    return kind, fingerprint_for_import_kind(kind)
+
+
+def before_send(event: dict, hint: Optional[dict] = None) -> Optional[dict]:
     """Recheck consent for every event, including long-running worker processes.
 
     Keep code locations, never arbitrary exception messages, request bodies,
@@ -79,6 +160,29 @@ def before_send(event: dict, _hint: dict) -> Optional[dict]:
     if not values:
         return None  # Logging-only payloads can contain video text; do not send them.
     clean["exception"] = {"values": values}
+    kind, fingerprint = _import_monitoring_fields(event, hint)
+    tags = event.get("tags") or {}
+    allowed = {
+        "area": {"studio"}, "error_code": STUDIO_ERROR_CODES,
+        "phase": {"screening", "production", "render", "analysis", "dispatch", "vision_test", "rewrite", "auto_frame", "framing_install"},
+        "analysis_mode": {"subtitle", "visual"},
+        "goal": {"content", "highlight", "promo"},
+        "runtime": {"python"}, "app_mode": {"web", "desktop"},
+        "build_environment": {"production", "development", "validation", "unknown"},
+        "telemetry_test": {"true"},
+        "pipeline_stage": PIPELINE_STAGES,
+    }
+    clean_tags = {key: value for key, value in tags.items()
+                  if key in allowed and isinstance(value, str) and value in allowed[key]}
+    if kind:
+        clean_tags["import_failure"] = kind
+    if clean_tags:
+        clean["tags"] = clean_tags
+    if clean_tags.get("area") == "studio" and clean_tags.get("error_code") in {"validation", "missing_resource", "authentication", "rate_limited", "refused", "llm_not_configured", "whisper_not_installed", "whisper_install_failed", "transcription_empty", "subtitle_setup", "timeline_empty"}:
+        clean["level"] = "warning"
+        clean["fingerprint"] = ["studio", clean_tags.get("phase", "unknown"), clean_tags["error_code"]]
+    if fingerprint:
+        clean["fingerprint"] = fingerprint
     return clean
 
 
@@ -120,8 +224,41 @@ def init_sentry(mode: str = "web") -> bool:
             LoggingIntegration(level=logging.ERROR, event_level=logging.ERROR),
         ],
     )
-    sentry_sdk.set_tag("runtime", "python")
-    sentry_sdk.set_tag("app_mode", mode)
+    # Consent can first enable the SDK inside a settings request. Request-local
+    # tags disappear when that request exits; process identity belongs globally.
+    scope = sentry_sdk.get_global_scope()
+    scope.set_tag("runtime", "python")
+    scope.set_tag("app_mode", mode)
+    build_environment = os.getenv("AUTOCLIP_BUILD_ENVIRONMENT", "unknown")
+    scope.set_tag("build_environment", build_environment)
+    if build_environment == "validation":
+        scope.set_tag("telemetry_test", "true")
     _initialized = True
     logger.info("Sentry 已启用（backend）")
     return True
+
+
+def capture_studio_exception(error: Exception, phase: str, *, analysis_mode=None, goal=None):
+    """Report caught worker errors without allowing monitoring to fail the worker.
+
+    Consent is checked both here and in before_send. Scope is isolated so worker
+    threads cannot leak their phase into unrelated requests. All tags are filtered.
+    """
+    if not _initialized or not crash_reports_enabled():
+        return None
+    try:
+        import sentry_sdk
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("area", "studio")
+            scope.set_tag("phase", phase)
+            scope.set_tag("error_code", studio_error_code(error))
+            stage = getattr(error, "stage", None)
+            if isinstance(stage, str) and stage in PIPELINE_STAGES:
+                scope.set_tag("pipeline_stage", stage)
+            if analysis_mode:
+                scope.set_tag("analysis_mode", analysis_mode)
+            if goal:
+                scope.set_tag("goal", goal)
+            return sentry_sdk.capture_exception(error)
+    except Exception:
+        return None

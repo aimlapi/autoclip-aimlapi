@@ -70,6 +70,9 @@ def test_step1_all_chunks_failing_surfaces_llm_error(tmp_path, prompt_files, mon
     assert exc.value.stage == "ANALYZE"
     assert "1/1" in exc.value.message
     assert "未配置LLM提供商" in exc.value.message
+    assert exc.value.code == "llm_not_configured"
+    assert "自备" in exc.value.hint
+    assert "设置 → 模型" in exc.value.hint
     assert "测试连接" in exc.value.hint
 
 
@@ -83,6 +86,24 @@ def test_step1_unparseable_response_is_a_failure_not_empty_list(tmp_path, prompt
 
     assert exc.value.stage == "ANALYZE"
     assert "无法解析" in exc.value.message
+    assert exc.value.code == "invalid_response"
+
+
+@pytest.mark.parametrize('error, expected_code', [
+    (RuntimeError('HTTP 429'), 'rate_limited'),
+    (RuntimeError('HTTP 500'), 'provider_error'),
+    (TimeoutError('synthetic timeout'), 'timeout'),
+    (ConnectionError('synthetic offline'), 'connection'),
+])
+def test_outline_provider_failure_retains_recoverable_code(tmp_path, prompt_files, monkeypatch, error, expected_code):
+    srt = tmp_path / 'input.srt'
+    srt.write_text(SRT, encoding='utf-8')
+    extractor = _extractor(tmp_path, prompt_files, monkeypatch, [error])
+    with pytest.raises(PipelineFailure) as caught:
+        extractor.extract_outline(srt)
+    assert caught.value.stage == 'ANALYZE'
+    assert caught.value.code == expected_code
+    assert caught.value.__cause__ is error
 
 
 def test_step1_partial_chunk_failure_still_returns_outline(tmp_path, prompt_files, monkeypatch):
@@ -140,16 +161,27 @@ def test_adapter_fails_fast_when_llm_not_configured(adapter, monkeypatch, tmp_pa
 
     assert result["status"] == "failed"
     assert result["stage"] == "ANALYZE"
+    assert result["error_code"] == "llm_not_configured"
     assert "Google Gemini · gemini-2.5-flash" in result["error"]
     assert "设置 → 模型" in result["error"]
+    assert "自备 API Key" in result["error"]
+    assert "控制台" in result["error"]
     assert result["message"] == result["error"]
     # 进度事件带着失败阶段，前端失败态 / 反馈对话框能拿到
     assert adapter._events[-1][0] == "ANALYZE"
     assert adapter._events[-1][1].startswith("处理失败：")
 
 
+def _whisper_status(monkeypatch, status: str, message: str = ""):
+    monkeypatch.setattr(
+        "backend.services.whisper_runtime.get_status",
+        lambda: {"status": status, "message": message},
+    )
+
+
 def test_adapter_fails_when_no_subtitle_and_auto_transcribe_yields_nothing(adapter, monkeypatch, tmp_path):
     _fake_manager(monkeypatch, available=True)
+    _whisper_status(monkeypatch, "not_installed")
 
     async def no_srt(self, video, metadata_dir):
         return None
@@ -160,10 +192,33 @@ def test_adapter_fails_when_no_subtitle_and_auto_transcribe_yields_nothing(adapt
 
     assert result["status"] == "failed"
     assert result["stage"] == "SUBTITLE"
-    assert "没有字幕" in result["error"]
-    assert "Whisper" in result["error"]
+    assert result["error_code"] == "whisper_not_installed"
+    assert "还没安装" in result["error"]
+    assert "设置 → 转写" in result["error"]
+    assert ".srt" in result["error"]
     # 以前会写一个空大纲然后「成功」；现在不该再产出 step1_outline.json
     assert not (tmp_path / "projects" / "proj-1" / "metadata" / "step1_outline.json").exists()
+
+
+def test_adapter_distinguishes_install_failure_from_empty_transcript(adapter, monkeypatch, tmp_path):
+    _fake_manager(monkeypatch, available=True)
+
+    async def no_srt(self, video, metadata_dir):
+        return None
+
+    monkeypatch.setattr(type(adapter), "_generate_subtitle_automatically", no_srt)
+
+    _whisper_status(monkeypatch, "error", "安装失败（pip 退出码 1）")
+    failed = asyncio.run(adapter.process_project_sync(str(tmp_path / "in.mp4"), ""))
+    assert failed["error_code"] == "whisper_install_failed"
+    assert "上次安装没有成功" in failed["error"]
+    assert ".srt" in failed["error"]
+
+    _whisper_status(monkeypatch, "installed")
+    empty = asyncio.run(adapter.process_project_sync(str(tmp_path / "in.mp4"), ""))
+    assert empty["error_code"] == "transcription_empty"
+    assert "已安装" in empty["error"]
+    assert ".srt" in empty["error"]
 
 
 def test_adapter_surfaces_whisper_error_on_the_subtitle_stage(adapter, monkeypatch, tmp_path):
@@ -183,9 +238,63 @@ def test_adapter_surfaces_whisper_error_on_the_subtitle_stage(adapter, monkeypat
 
     assert result["status"] == "failed"
     assert result["stage"] == "SUBTITLE"
+    assert result["error_code"] == "subtitle_setup"
     assert "显卡" in result["error"]
     assert "设置 → 转写" in result["error"]
     assert result["message"] == result["error"]
+
+
+def test_adapter_empty_timeline_does_not_send_user_to_model_settings(adapter, monkeypatch, tmp_path):
+    """连接已成功时，时间线为空不要再提示去改模型 / API Key（#182）。"""
+    from backend.services import simple_pipeline_adapter as mod
+
+    _fake_manager(monkeypatch, available=True, display_name="阿里通义千问", model="qwen-plus")
+    srt = tmp_path / "in.srt"
+    srt.write_text(SRT, encoding="utf-8")
+    monkeypatch.setattr(mod, "run_step1_outline", lambda *a, **k: [{"title": f"t{i}"} for i in range(4)])
+    monkeypatch.setattr(mod, "run_step2_timeline", lambda *a, **k: [])
+
+    result = asyncio.run(adapter.process_project_sync(str(tmp_path / "in.mp4"), str(srt)))
+
+    assert result["status"] == "failed"
+    assert result["stage"] == "ANALYZE"
+    assert result["error_code"] == "timeline_empty"
+    assert "4 个话题" in result["error"]
+    assert "20" in result["error"]
+    assert "时间戳" in result["error"]
+    assert "最短时长" in result["error"]
+    assert "设置 → 模型" not in result["error"]
+    assert "API Key" not in result["error"]
+    assert "测试连接" not in result["error"]
+    assert result["message"] == result["error"]
+    assert adapter._events[-1][0] == "ANALYZE"
+    assert "时间线提取为空" in adapter._events[-1][1]
+
+
+def test_empty_timeline_hint_survives_last_error_metadata():
+    """CLI 只把正文写进 last_error 时，错误码和提示仍能回到详情页。"""
+    from backend.pipeline.failures import empty_timeline_failure
+    from backend.services.project_service import ProjectService
+
+    class Q:
+        def filter(self, *a, **k): return self
+        def order_by(self, *a, **k): return self
+        def first(self): return None
+
+    failure = empty_timeline_failure(4)
+    svc = ProjectService.__new__(ProjectService)
+    svc.db = SimpleNamespace(query=lambda model: Q())
+    project = SimpleNamespace(
+        id="p1",
+        status="failed",
+        project_metadata={"last_error": failure.user_message(), "last_error_code": failure.code},
+    )
+
+    message = svc.latest_error_message(project)
+    assert message == failure.user_message()
+    assert svc.latest_error_code(project) == "timeline_empty"
+    assert "设置 → 模型" not in message
+    assert "API Key" not in message
 
 
 def test_adapter_fails_when_scoring_keeps_nothing(adapter, monkeypatch, tmp_path):
@@ -224,6 +333,44 @@ def test_adapter_fails_when_ffmpeg_produced_no_clip(adapter, monkeypatch, tmp_pa
     assert result["status"] == "failed"
     assert result["stage"] == "EXPORT"
     assert "ffmpeg" in result["error"]
+
+
+def test_fast_output_skips_clustering_and_clip_encoding(adapter, monkeypatch, tmp_path):
+    import pytest
+    from backend.services import simple_pipeline_adapter as mod
+
+    _fake_manager(monkeypatch, available=True)
+    srt = tmp_path / "in.srt"
+    srt.write_text(SRT, encoding="utf-8")
+    monkeypatch.setattr(mod, "run_step1_outline", lambda *a, **k: [{"title": "t"}])
+    monkeypatch.setattr(mod, "run_step2_timeline", lambda *a, **k: [{"id": 1}])
+    monkeypatch.setattr(mod, "run_step3_scoring", lambda *a, **k: [{"id": 1, "final_score": 0.9}])
+    monkeypatch.setattr(mod, "run_step4_title", lambda *a, **k: [{"id": 1, "generated_title": "x"}])
+    monkeypatch.setattr(mod, "run_step5_clustering", lambda *a, **k: pytest.fail("studio never reads collections"))
+    monkeypatch.setattr(mod, "run_step6_video", lambda *a, **k: pytest.fail("studio renders from the source"))
+    monkeypatch.setattr(mod.SimplePipelineAdapter, "_find_clips_in_one_pass", lambda *a: None)  # one pass unavailable: legacy steps
+
+    result = asyncio.run(adapter.process_project_sync(str(tmp_path / "in.mp4"), str(srt), clips_only=True))
+
+    assert result["status"] == "succeeded"
+    assert result["result"]["titled_clips"] == [{"id": 1, "generated_title": "x"}]
+
+
+def test_fast_output_uses_the_one_pass_clip_finder_when_it_works(adapter, monkeypatch, tmp_path):
+    import pytest
+    from backend.services import simple_pipeline_adapter as mod
+
+    _fake_manager(monkeypatch, available=True)
+    srt = tmp_path / "in.srt"
+    srt.write_text(SRT, encoding="utf-8")
+    for step in ("run_step1_outline", "run_step2_timeline", "run_step3_scoring", "run_step4_title"):
+        monkeypatch.setattr(mod, step, lambda *a, **k: pytest.fail("the one pass replaces the four legacy steps"))
+    clips = [{"id": "1", "generated_title": "一次挑片", "start_time": "00:00:01,000", "end_time": "00:01:40,000"}]
+    monkeypatch.setattr(mod.SimplePipelineAdapter, "_find_clips_in_one_pass", lambda *a: clips)
+
+    result = asyncio.run(adapter.process_project_sync(str(tmp_path / "in.mp4"), str(srt), clips_only=True))
+
+    assert result["status"] == "succeeded" and result["result"]["titled_clips"] == clips
 
 
 def test_adapter_happy_path_still_succeeds(adapter, monkeypatch, tmp_path):
@@ -288,7 +435,15 @@ def test_project_response_exposes_latest_task_error(monkeypatch):
     project = SimpleNamespace(id="p1", status="failed", project_metadata={})
 
     assert svc.latest_error_message(project) == task.error_message
+    assert svc.latest_error_code(project) is None
     assert svc.latest_error_message(SimpleNamespace(id="p1", status="completed", project_metadata={})) is None
+
+    keyed = SimpleNamespace(
+        error_message="没有可用的 LLM 提供商，缺少 API Key。",
+        result_data={"error_code": "llm_not_configured"},
+    )
+    svc.db = SimpleNamespace(query=lambda model: Q([keyed]))
+    assert svc.latest_error_code(project) == "llm_not_configured"
 
 
 def test_project_response_falls_back_to_metadata_for_cli_runs():
@@ -302,9 +457,38 @@ def test_project_response_falls_back_to_metadata_for_cli_runs():
     svc = ProjectService.__new__(ProjectService)
     svc.db = SimpleNamespace(query=lambda model: Q())
     project = SimpleNamespace(id="p1", status=SimpleNamespace(value="failed"),
-                              project_metadata={"last_error": "没有可用的 LLM 提供商"})
+                              project_metadata={"last_error": "没有可用的 LLM 提供商", "last_error_code": "llm_not_configured"})
 
     assert svc.latest_error_message(project) == "没有可用的 LLM 提供商"
+    assert svc.latest_error_code(project) == "llm_not_configured"
+
+
+def test_project_response_exposes_subtitle_error_code():
+    from backend.services.project_service import ProjectService
+
+    class Q:
+        def __init__(self, row): self.row = row
+        def filter(self, *a, **k): return self
+        def order_by(self, *a, **k): return self
+        def first(self): return self.row
+
+    task = SimpleNamespace(
+        error_message="没有字幕可分析",
+        result_data={"error_code": "whisper_not_installed"},
+    )
+    svc = ProjectService.__new__(ProjectService)
+    svc.db = SimpleNamespace(query=lambda model: Q(task))
+    project = SimpleNamespace(id="p1", status="failed", project_metadata={})
+
+    assert svc.latest_error_code(project) == "whisper_not_installed"
+
+    svc.db = SimpleNamespace(query=lambda model: Q(None))
+    cli_project = SimpleNamespace(
+        id="p1",
+        status="failed",
+        project_metadata={"last_error": "没有字幕", "last_error_code": "transcription_empty"},
+    )
+    assert svc.latest_error_code(cli_project) == "transcription_empty"
 
 
 def test_processing_task_reads_error_field_from_adapter_result():

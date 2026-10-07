@@ -11,6 +11,8 @@ from enum import Enum
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.core.aimlapi_attribution import aimlapi_headers
+
 logger = logging.getLogger(__name__)
 
 class ProviderType(Enum):
@@ -94,7 +96,8 @@ class LLMProvider(ABC):
         """构建完整的输入"""
         if input_data:
             if isinstance(input_data, (dict, list, tuple)):
-                return f"{prompt}\n\n输入内容：\n{json.dumps(input_data, ensure_ascii=False, indent=2, default=str)}"
+                # Compact JSON: indentation adds ~10 tokens per subtitle row for no gain.
+                return f"{prompt}\n\n输入内容：\n{json.dumps(input_data, ensure_ascii=False, default=str)}"
             else:
                 return f"{prompt}\n\n输入内容：\n{input_data}"
         return prompt
@@ -148,8 +151,10 @@ class DashScopeProvider(LLMProvider):
                     del os.environ["DASHSCOPE_API_KEY"]
                 if resp and getattr(resp, 'status_code', 200) == 200:
                     if getattr(resp, 'output', None) and getattr(resp.output, 'text', None) is not None:
+                        usage = getattr(resp, 'usage', None)
                         return LLMResponse(
                             content=resp.output.text,
+                            usage={'input_tokens': usage.get('input_tokens'), 'output_tokens': usage.get('output_tokens')} if usage else None,
                             model=self.model_name,
                             finish_reason=getattr(resp.output, 'finish_reason', None)
                         )
@@ -171,6 +176,7 @@ class DashScopeProvider(LLMProvider):
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 }
+                headers.update(aimlapi_headers(self.base_url))
                 payload = {
                     "model": self.model_name,
                     "messages": [{"role": "user", "content": full_input}],
@@ -231,6 +237,12 @@ class DashScopeProvider(LLMProvider):
         return _catalog_model_infos(ProviderType.DASHSCOPE)
 
 OPENAI_OFFICIAL_BASE_URL = "https://api.openai.com/v1"
+# 连通性测试的输出预算。以前是 1，推理型模型光思考就超了，服务端直接 400
+# "Could not finish the message because max_tokens ... was reached"，而 key 明明是好的，
+# 设置页却报连接失败。实测 2026-10-07：openai/gpt-6-luna（本预设的默认模型）给 1 个 token 必 400，
+# 给 10 就能返回；gpt-6.1-sol / claude-sonnet-5.5 / gemini-3.8-flash 给 1 也能过。
+# 留 256 有富余；探针只发两个字，用不到的额度不计费。
+CONNECTION_PROBE_MAX_TOKENS = 256
 # 本地/自建 OpenAI 兼容服务（Ollama、vLLM、LM Studio 等）通常不校验 key，但 SDK 要求非空
 OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "EMPTY"
 # 通义千问 OpenAI 兼容接口：中国站 / 国际站（alibabacloud.com 开通的 key 只能打国际站，#45）
@@ -277,6 +289,32 @@ def make_openai_http_client(base_url: Optional[str]):
         return None
 
 
+# DeepSeek 思考模式默认开启（effort 为 high），推理 token 按输出计费，单次输出上限 384K。
+# 切片分析只要结构化结果。不关的话，几小时字幕、分块多步调用，账单会明显高于可见回答。
+DEEPSEEK_COMPLETION_TOKEN_CAP = 16384
+
+
+def is_deepseek_endpoint(base_url: Optional[str]) -> bool:
+    return "api.deepseek.com" in (base_url or "").lower()
+
+
+def deepseek_chat_kwargs(base_url: Optional[str], request: Dict[str, Any]) -> Dict[str, Any]:
+    """关掉官方 DeepSeek 的默认思考模式，并给未指定的输出加上限。
+
+    调用方已经传入的 max_tokens（例如连接测试的 1）保持不变。
+    非 api.deepseek.com 的兼容接口不改请求体，避免把 thinking 字段发给不认识它的服务。
+    """
+    if not is_deepseek_endpoint(base_url):
+        return request
+    guarded = dict(request)
+    extra = dict(guarded.get("extra_body") or {})
+    extra.setdefault("thinking", {"type": "disabled"})
+    guarded["extra_body"] = extra
+    if guarded.get("max_tokens") is None:
+        guarded["max_tokens"] = DEEPSEEK_COMPLETION_TOKEN_CAP
+    return guarded
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI 及一切 OpenAI 兼容接口（智谱、DeepSeek、OpenRouter、Ollama、vLLM、LM Studio 等）
 
@@ -298,6 +336,10 @@ class OpenAIProvider(LLMProvider):
                 http_client = make_openai_http_client(self.base_url)
                 if http_client is not None:
                     client_kwargs["http_client"] = http_client
+                # 归因请求头只在目标就是 AI/ML API 时附带，别的兼容接口一律不发
+                attribution = aimlapi_headers(self.base_url)
+                if attribution:
+                    client_kwargs["default_headers"] = attribution
             self.client = openai.OpenAI(**client_kwargs)
         except ImportError:
             raise ImportError("请安装openai: pip install openai")
@@ -306,12 +348,12 @@ class OpenAIProvider(LLMProvider):
         """调用OpenAI API"""
         try:
             full_input = self._build_full_input(prompt, input_data)
-            
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": full_input}],
-                **kwargs
-            )
+            payload = deepseek_chat_kwargs(self.base_url, {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": full_input}],
+                **kwargs,
+            })
+            response = self.client.chat.completions.create(**payload)
             
             content = response.choices[0].message.content
             usage = {
@@ -319,6 +361,14 @@ class OpenAIProvider(LLMProvider):
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens
             } if response.usage else None
+            if usage:
+                logger.info(
+                    "LLM usage model=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
+                    self.model_name,
+                    usage.get("prompt_tokens"),
+                    usage.get("completion_tokens"),
+                    usage.get("total_tokens"),
+                )
             
             return LLMResponse(
                 content=content,
@@ -343,7 +393,7 @@ class OpenAIProvider(LLMProvider):
                     logger.warning(f"OpenAI API Key格式可能不正确，期望以'sk-'开头，实际: {self.api_key[:10]}...")
             
             # 使用最简单的测试
-            response = self.call("测试", max_tokens=1)
+            response = self.call("测试", max_tokens=CONNECTION_PROBE_MAX_TOKENS)
             return response and response.content is not None
         except Exception as e:
             logger.error(f"OpenAI连接测试失败 (base_url={self.base_url or OPENAI_OFFICIAL_BASE_URL}): {e}")

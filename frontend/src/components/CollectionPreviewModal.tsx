@@ -1,16 +1,15 @@
 import { t } from '../i18n'
 import { useTranslation } from 'react-i18next'
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Modal, Row, Col, Button, Space, Typography, Tag, message, Popconfirm } from 'antd'
 import { PlayCircleOutlined, DeleteOutlined, MenuOutlined, CloseOutlined, LeftOutlined, RightOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons'
-import ReactPlayer from 'react-player'
 import { DragDropContext, Droppable, Draggable, DropResult } from 'react-beautiful-dnd'
 import { Collection, Clip, useProjectStore } from '../store/useProjectStore'
 import { projectApi } from '../services/api'
 import AddClipToCollectionModal from './AddClipToCollectionModal'
 import { useCollectionVideoDownload } from '../hooks/useCollectionVideoDownload'
-import UploadModal from './UploadModal'
 import EditableTitle from './EditableTitle'
+import ClipVideo from './ClipVideo'
 import './CollectionPreviewModal.css'
 
 const { Title, Text } = Typography
@@ -46,8 +45,6 @@ const CollectionPreviewModal: React.FC<CollectionPreviewModalProps> = ({
 
   const [showAddClipModal, setShowAddClipModal] = useState(false)
   const [isUpdating, setIsUpdating] = useState(false)
-  const [showUploadModal, setShowUploadModal] = useState(false)
-  const playerRef = useRef<ReactPlayer>(null)
   const { setDragging } = useProjectStore()
   const { isGenerating, generateAndDownloadCollectionVideo } = useCollectionVideoDownload()
 
@@ -303,13 +300,9 @@ const CollectionPreviewModal: React.FC<CollectionPreviewModalProps> = ({
               <div className="video-player-wrapper">
                 <div className="video-container">
                   {currentClip ? (
-                    <ReactPlayer
-                      ref={playerRef}
+                    <ClipVideo
                       url={projectApi.getClipVideoUrl(projectId, currentClip.id, currentClip.title || currentClip.generated_title)}
-                      width="100%"
-                      height="100%"
                       playing={playing}
-                      controls
                       onEnded={handleVideoEnd}
                       onPlay={() => setPlaying(true)}
                       onPause={() => setPlaying(false)}
@@ -518,18 +511,6 @@ const CollectionPreviewModal: React.FC<CollectionPreviewModalProps> = ({
         onConfirm={handleAddClips}
       />
 
-      {/* 投稿弹窗 */}
-      <UploadModal
-        visible={showUploadModal}
-        onCancel={() => setShowUploadModal(false)}
-        projectId={projectId}
-        clipIds={collectionClips.map(clip => clip.id)}
-        clipTitles={collectionClips.map(clip => clip.generated_title || clip.title || t("视频片段"))}
-        onSuccess={() => {
-          // 投稿成功后可以刷新数据或显示提示
-          console.log('合集投稿成功')
-        }}
-      />
     </Modal>
   )
 }

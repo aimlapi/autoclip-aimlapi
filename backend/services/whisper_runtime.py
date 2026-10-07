@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 # 要安装的运行时包（faster-whisper 带上 ctranslate2、onnxruntime、av、huggingface_hub 等，
 # 不含 PyTorch）
-WHISPER_PACKAGES = ["faster-whisper"]
+# PyAV 19 removed av.open(metadata_errors=...), still used by faster-whisper.
+WHISPER_PACKAGES = ["faster-whisper", "av<19"]
 # 运行时核心模块（用于探测是否已装）
 WHISPER_IMPORT_NAME = "faster_whisper"
+_runtime_import_error = ""
 
 
 def _data_dir() -> Path:
@@ -52,6 +54,34 @@ def get_models_dir() -> Path:
     return d
 
 
+def _install_error_path() -> Path:
+    return _data_dir() / "whisper-install-error.txt"
+
+
+def _read_install_error() -> str:
+    """上次安装失败的一句说明。进程重启后内存状态会丢，设置页仍要能显示「重试安装」。"""
+    try:
+        return _install_error_path().read_text(encoding="utf-8").strip()[:500]
+    except Exception:
+        return ""
+
+
+def _write_install_error(message: str) -> None:
+    try:
+        path = _install_error_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text((message or "安装失败")[:500], encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"记录 Whisper 安装失败原因失败: {e}")
+
+
+def _clear_install_error() -> None:
+    try:
+        _install_error_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def ensure_on_path() -> None:
     """把运行时目录加入 sys.path，并把模型缓存目录收口到 HF_HOME。"""
     install_dir = str(get_install_dir())
@@ -72,11 +102,18 @@ def ensure_on_path() -> None:
 
 def is_installed() -> bool:
     """运行时是否已就绪（faster_whisper 可被导入）。"""
+    global _runtime_import_error
     ensure_on_path()
     try:
-        import importlib.util
-        return importlib.util.find_spec(WHISPER_IMPORT_NAME) is not None
-    except Exception:
+        import importlib
+        importlib.import_module(WHISPER_IMPORT_NAME)
+        _runtime_import_error = ""
+        return True
+    except Exception as exc:
+        missing_package = isinstance(exc, ModuleNotFoundError) and exc.name == WHISPER_IMPORT_NAME
+        _runtime_import_error = "" if missing_package else (
+            f"Whisper 运行时依赖加载失败（{type(exc).__name__}）。请重新安装 Whisper 后重启 AutoClip。"
+        )
         return False
 
 
@@ -98,11 +135,21 @@ def _set_state(**kw) -> None:
 def get_status() -> Dict[str, Any]:
     with _state_lock:
         st = dict(_state)
-    # 没在安装时，用实际探测结果覆盖
-    if st["status"] not in ("installing",):
-        st["status"] = "installed" if is_installed() else "not_installed"
-        if st["status"] == "installed":
+    # 安装进行中不打断。装完后以能否导入为准。
+    # 失败必须留下 error：否则每次轮询都盖成 not_installed，设置页的「重试安装」永远不会出现。
+    if st["status"] != "installing":
+        if is_installed():
+            st["status"] = "installed"
             st["progress"] = 100
+        elif st["status"] == "error":
+            pass
+        else:
+            remembered = _runtime_import_error or _read_install_error()
+            if remembered:
+                st["status"] = "error"
+                st["message"] = remembered
+            else:
+                st["status"] = "not_installed"
     st["platform_supported"] = True  # faster-whisper 跨平台
     st["packages"] = WHISPER_PACKAGES
     return st
@@ -123,7 +170,8 @@ def _do_install(index_url: Optional[str]) -> None:
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PIP_PROGRESS_BAR": "off"},
         )
         lines: list[str] = []
         for line in iter(proc.stdout.readline, ""):
@@ -141,14 +189,19 @@ def _do_install(index_url: Optional[str]) -> None:
             _set_state(log_tail="\n".join(lines[-12:]))
         proc.wait()
         if proc.returncode == 0 and is_installed():
+            _clear_install_error()
             _set_state(status="installed", progress=100, message="安装完成")
             logger.info("Whisper 运行时安装完成")
         else:
-            _set_state(status="error", message=f"安装失败（pip 退出码 {proc.returncode}）")
+            message = f"安装失败（pip 退出码 {proc.returncode}）"
+            _write_install_error(message)
+            _set_state(status="error", message=message)
             logger.error(f"Whisper 运行时安装失败，pip 退出码 {proc.returncode}")
     except Exception as e:  # noqa: BLE001
         logger.error(f"安装 Whisper 运行时异常: {e}", exc_info=True)
-        _set_state(status="error", message=f"安装异常: {e}")
+        message = f"安装异常: {e}"
+        _write_install_error(message)
+        _set_state(status="error", message=message)
 
 
 def _bump_progress(min_v: int, max_v: int, message: str) -> None:
@@ -162,6 +215,7 @@ def start_install(index_url: Optional[str] = None) -> Dict[str, Any]:
     with _state_lock:
         if _state["status"] == "installing":
             return {"started": False, "message": "正在安装中"}
+        _state.update(status="installing", progress=0, message="正在检查运行时…", log_tail="")
     if is_installed():
         _set_state(status="installed", progress=100, message="已安装")
         return {"started": False, "message": "已安装"}
@@ -184,6 +238,7 @@ def uninstall() -> Dict[str, Any]:
         p = str(install_dir)
         if p in sys.path:
             sys.path.remove(p)
+        _clear_install_error()
         _set_state(status="not_installed", progress=0, message="已卸载")
         return {"success": True, "message": "已卸载 Whisper 运行时"}
     except Exception as e:  # noqa: BLE001
